@@ -8,11 +8,11 @@ from base64 import b64decode
 from openai import OpenAI
 
 # ==============================================================================
-# 大模型 API 配置区域 (开源时提示用户填入自己的 key)
+# 大模型 API 配置区域 (用户填入自己的 key)
 # ==============================================================================
-API_URL = "https://api.longcat.chat/v1"  # 替换为你的大模型 API 地址
+API_URL = " "  # 替换为你的大模型 API 地址
 API_KEY = "YOUR_API_KEY_HERE"  # 替换为你的大模型 API_KEY
-MODEL_NAME = "Long-Cat"  # 替换为你使用的模型名称
+MODEL_NAME = ""  # 替换为你使用的模型名称
 
 
 class ZhiHuiShuQRLogin:
