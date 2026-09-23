@@ -8,26 +8,15 @@ from base64 import b64decode
 from openai import OpenAI
 
 # ==============================================================================
-# 配置文件区域 - 使用前请按需修改
+# 大模型 API 配置区域 (开源时提示用户填入自己的 key)
 # ==============================================================================
-
-# 1. 大模型 API 配置区域 (默认留空，供用户自己配置)
-API_URL = " "  # 替换为你的大模型 API 地址 (如果是官方 OpenAI 可留空或填默认)
+API_URL = "https://api.longcat.chat/v1"  # 替换为你的大模型 API 地址
 API_KEY = "YOUR_API_KEY_HERE"  # 替换为你的大模型 API_KEY
-MODEL_NAME = " "  # 替换为你使用的模型名称
-
-# 2. 考试目标 配置区域
-COURSE_ID = ""  # 替换为你要考试的 COURSE_ID
-
-# 3. 试卷列表 (请根据抓包结果替换对应的 test_id 和 paper_id)
-EXAM_LIST = [
-    {"chapter": "第一章", "test_id": " ", "paper_id": " "},
-    # 根据需要在此处继续添加其他章节...
-]
+MODEL_NAME = "Long-Cat"  # 替换为你使用的模型名称
 
 
 class ZhiHuiShuQRLogin:
-    """智慧树扫码登录模块"""
+    """智慧树扫码登录模块 (无缝获取 Cookie)"""
 
     def __init__(self):
         self.session = requests.Session()
@@ -39,11 +28,11 @@ class ZhiHuiShuQRLogin:
     def _open_image(self, file_path):
         """跨平台自动打开二维码图片"""
         try:
-            if sys.platform.startswith('darwin'):  # macOS
+            if sys.platform.startswith('darwin'):
                 os.system(f'open "{file_path}"')
-            elif os.name == 'nt':  # Windows
+            elif os.name == 'nt':
                 os.startfile(file_path)
-            elif os.name == 'posix':  # Linux
+            elif os.name == 'posix':
                 os.system(f'xdg-open "{file_path}"')
         except Exception:
             pass
@@ -55,7 +44,6 @@ class ZhiHuiShuQRLogin:
         login_page = "https://passport.zhihuishu.com/login?service=https://onlineservice-api.zhihuishu.com/login/gologin"
 
         try:
-            # 1. 获取二维码图片与 Token
             res = self.session.get(qr_page, timeout=10).json()
             qr_token = res.get("qrToken")
             img_data = b64decode(res.get("img"))
@@ -68,7 +56,6 @@ class ZhiHuiShuQRLogin:
             self._open_image(qr_file)
             print("⏳ 请使用手机【知到APP】或【微信】扫码登录...")
 
-            # 2. 轮询扫码状态
             scanned = False
             while True:
                 time.sleep(1.5)
@@ -76,7 +63,7 @@ class ZhiHuiShuQRLogin:
                 status = status_res.get("status")
 
                 if status == -1:
-                    pass  # 尚未扫码
+                    pass
                 elif status == 0:
                     if not scanned:
                         print("👀 已扫码，请在手机上点击确认！")
@@ -84,8 +71,6 @@ class ZhiHuiShuQRLogin:
                 elif status == 1:
                     print("🎉 登录成功！正在获取身份凭证...")
                     once_pwd = status_res.get("oncePassword")
-
-                    # 3. 换取最终的 Cookie
                     self.session.get(login_page, params={"pwd": once_pwd}, timeout=10)
                     cookie_str = "; ".join([f"{k}={v}" for k, v in self.session.cookies.get_dict().items()])
                     return cookie_str
@@ -95,7 +80,6 @@ class ZhiHuiShuQRLogin:
                 elif status == 3:
                     print("❌ 登录已取消。")
                     return None
-
         except Exception as e:
             print(f"❌ 登录请求出现异常: {e}")
             return None
@@ -112,10 +96,89 @@ class ZhiHuiShuAutoExam:
             "Accept": "application/json, text/plain, */*"
         }
         self.ai_client = OpenAI(api_key=API_KEY, base_url=API_URL)
+        self.course_id = None
+        self.exam_list = []
 
+    # ========================================================================
+    # 核心突破：单接口双重解析 (获取课程列表 + 考试列表)
+    # ========================================================================
+    def init_tasks(self):
+        """调用接口自动拉取并分类所有作业和考试"""
+        print(f"\n🔍 正在扫描当前账号下的所有作业与考试...")
+
+        url = "https://studentexam-api.zhihuishu.com/studentExam/gateway/t/v1/student/getStudentHomework"
+        req_headers = self.headers.copy()
+        req_headers["Content-Type"] = "application/x-www-form-urlencoded"
+
+        try:
+            # 提交空表单以获取该账号下的全部未完成/已完成作业
+            res = requests.post(url, data={}, headers=req_headers).json()
+            if res.get("status") != "200" and res.get("msg") != "请求成功":
+                print(f"❌ 获取列表失败，服务器返回: {res}")
+                return False
+
+            homework_list = res.get("rt", {}).get("studentHomeworkList", [])
+            if not homework_list:
+                print("⚠️ 恭喜！当前账号下未找到任何待处理的作业或考试。")
+                return False
+
+            # 1. 解析数据：提取所有包含的课程信息
+            courses = {}
+            for hw in homework_list:
+                cid = str(hw.get("courseId", ""))
+                cname = hw.get("courseName", "未知课程")
+                if cid and cid not in courses:
+                    courses[cid] = cname
+
+            if not courses:
+                print("⚠️ 未能在数据中提取到有效的课程信息。")
+                return False
+
+            # 2. 交互环节：让用户选择课程
+            course_ids = list(courses.keys())
+            if len(course_ids) == 1:
+                self.course_id = course_ids[0]
+                print(f"✅ 自动锁定唯一待考课程: {courses[self.course_id]} (ID: {self.course_id})")
+            else:
+                print("\n📚 发现以下课程有作业/考试，请选择（输入对应数字）：")
+                for i, cid in enumerate(course_ids):
+                    print(f"[{i + 1}] {courses[cid]} (ID: {cid})")
+
+                try:
+                    choice = int(input("\n👉 你的选择是: ")) - 1
+                    if choice < 0 or choice >= len(course_ids):
+                        raise ValueError
+                    self.course_id = course_ids[choice]
+                except ValueError:
+                    print("❌ 输入无效，程序退出。")
+                    return False
+
+            # 3. 提取环节：过滤并构建所选课程的考试列表
+            for hw in homework_list:
+                if str(hw.get("courseId")) == self.course_id:
+                    hw_name = hw.get("examName", "未知测试")
+                    test_id = hw.get("id")  # 试题 ID
+                    paper_id = hw.get("examId")  # 试卷 ID
+
+                    if test_id and paper_id:
+                        self.exam_list.append({
+                            "chapter": hw_name,
+                            "test_id": test_id,
+                            "paper_id": paper_id
+                        })
+
+            print(f"✅ 成功加载 {len(self.exam_list)} 个考试/作业任务！")
+            return True
+
+        except Exception as e:
+            print(f"❌ 请求考试列表异常: {e}")
+            return False
+
+    # ========================================================================
+    # 答题与提交流程
+    # ========================================================================
     def call_llm_for_answer(self, question_type, question_content, options):
         options_text = "\n".join([f"{opt['letter']}. {opt['content']}" for opt in options])
-
         prompt = f"""你是一个专业的学术助手，请解答这道大学考试题目。
 题目类型：{question_type}
 题目内容：{question_content}
@@ -148,30 +211,24 @@ class ZhiHuiShuAutoExam:
         params = {
             "examTestId": test_id,
             "examPaperId": paper_id,
-            "courseId": COURSE_ID
+            "courseId": self.course_id
         }
         try:
             res = requests.get(url, params=params, headers=self.headers).json()
-            code = res.get('code')
-            if code == 0 or code == 200:
+            if res.get('code') in [0, 200]:
                 data_node = res.get('data', {})
-                if not data_node:
-                    return []
                 parts = data_node.get('partSheetVos', [])
-                if not parts:
-                    return []
-                return parts[0].get('questionSheetVos', [])
-            else:
-                print(f"[Debug-获取试卷] ❌ 接口被拒绝，返回: {res}")
+                if parts:
+                    return parts[0].get('questionSheetVos', [])
         except Exception as e:
             print(f"[Debug-获取试卷] ❌ 请求异常: {e}")
         return []
 
     def get_question_detail(self, test_id, paper_id, question_id):
-        url = f"https://studentexamtest.zhihuishu.com/gateway/t/v1/question/getExamQuestionInfo?examTestId={test_id}&examPaperId={paper_id}&questionId={question_id}&courseId={COURSE_ID}"
+        url = f"https://studentexamtest.zhihuishu.com/gateway/t/v1/question/getExamQuestionInfo?examTestId={test_id}&examPaperId={paper_id}&questionId={question_id}&courseId={self.course_id}"
         try:
             res = requests.get(url, headers=self.headers).json()
-            if res.get('code') == 0 or res.get('code') == 200:
+            if res.get('code') in [0, 200]:
                 return res.get('data')
         except Exception as e:
             print(f"[Debug-题目详情] ❌ 请求异常: {e}")
@@ -183,12 +240,12 @@ class ZhiHuiShuAutoExam:
             "examTestId": test_id,
             "examPaperId": paper_id,
             "questionId": question_id,
-            "courseId": COURSE_ID,
+            "courseId": self.course_id,
             "answer": '#@#'.join(str(aid) for aid in answer_option_ids)
         }
         try:
             res = requests.post(url, json=data, headers=self.headers).json()
-            if res.get('code') == 0 or res.get('code') == 200 or res.get('rt'):
+            if res.get('code') in [0, 200] or res.get('rt'):
                 return True
         except Exception as e:
             print(f"[Debug-提交答案] ❌ 请求异常: {e}")
@@ -199,29 +256,33 @@ class ZhiHuiShuAutoExam:
         data = {
             "examTestId": test_id,
             "examPaperId": paper_id,
-            "courseId": COURSE_ID
+            "courseId": self.course_id
         }
         try:
             res = requests.post(url, json=data, headers=self.headers).json()
-            code = res.get('code')
-            if code == 0 or code == 200 or res.get('rt'):
+            if res.get('code') in [0, 200] or res.get('rt'):
                 return True
-            return False
         except Exception:
-            return False
+            pass
+        return False
 
     def run(self):
-        print("\n▶️ 开始全自动答题任务...")
+        # 1. 自动初始化并让用户选择课程
+        if not self.init_tasks():
+            return
 
-        for exam in EXAM_LIST:
-            chapter_name = exam["chapter"]
-            test_id = exam["test_id"]
-            paper_id = exam["paper_id"]
+        print(f"\n▶️ 开始全自动答题任务！")
+
+        # 2. 循环执行任务
+        for exam in self.exam_list:
+            chapter_name = exam.get("chapter", "未知章节")
+            test_id = exam.get("test_id")
+            paper_id = exam.get("paper_id")
 
             print(f"\n================ 正在处理：{chapter_name} ================")
             questions = self.get_exam_sheet(test_id, paper_id)
             if not questions:
-                print(f"⚠️ {chapter_name} 未获取到题目，可能已交卷，跳过。")
+                print(f"⚠️ {chapter_name} 未获取到题目，可能已完成并交卷，跳过。")
                 continue
 
             print(f"📋 共获取到 {len(questions)} 道题目。")
@@ -258,8 +319,7 @@ class ZhiHuiShuAutoExam:
 
                 time.sleep(3.5)  # 题目间隔防风控
 
-            # 执行自动交卷
-            print(f"\n⏳ 正在自动提交 {chapter_name} 的作业...")
+            print(f"\n⏳ 正在自动提交 {chapter_name} ...")
             success = self.submit_exam(test_id, paper_id)
             if success:
                 print(f"🎉 {chapter_name} 自动交卷成功！")
@@ -268,28 +328,29 @@ class ZhiHuiShuAutoExam:
 
             time.sleep(5)  # 章节之间休眠防风控
 
-        print("\n⏹️ 所有章节执行完毕，脚本退出。")
+        print("\n⏹️ 选定课程所有考试执行完毕，脚本退出。")
 
 
 if __name__ == "__main__":
     print("=" * 55)
-    print(" 🎓 智慧树全自动考试 ")
+    print(" 🎓 智慧树全自动满分助手 (终极开源一键版) ")
     print("=" * 55)
 
-    # 步骤 1：扫码获取 Cookie
+    # 步骤 1: 扫码登录拿 Cookie
     login_module = ZhiHuiShuQRLogin()
     cookie = login_module.login()
 
     if cookie:
-        # 清理登录过程中产生的二维码图片
+        # 清除二维码残余图片
         try:
             if os.path.exists("login_qr.png"):
                 os.remove("login_qr.png")
         except Exception:
             pass
 
-        # 步骤 2：启动答题引擎
+        # 步骤 2: 全自动执行 (解析列表 + 作答)
         bot = ZhiHuiShuAutoExam(cookie)
         bot.run()
+
     else:
         print("\n⏹️ 未能获取身份凭证，程序已退出。")
